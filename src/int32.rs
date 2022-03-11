@@ -1,5 +1,3 @@
-use std::os::unix::thread::RawPthread;
-
 #[derive(Debug, PartialEq)]
 pub struct Int32 {
     parts: [i16; 4],
@@ -15,6 +13,12 @@ impl From<i32> for Int32 {
                 ((n >> 24) & 0xFF) as i16,
             ],
         }
+    }
+}
+
+impl From<Int32> for i32 {
+    fn from(n: Int32) -> Self {
+        (n.parts[3] as i32) << 24 | (n.parts[2] as i32) << 16 | (n.parts[1] as i32) << 8 | (n.parts[0] as i32) << 0
     }
 }
 
@@ -76,20 +80,22 @@ impl Int32 {
 }
 
 impl Int32 {
-    pub fn sub(&mut self, other: &mut Self) {
+    pub fn sub(&mut self, other: &Self) {
+        let mut other = Self { parts: other.parts };
         other.neg();
         self.add(&other);
     }
 }
 
 impl Int32 {
-    pub fn mul(&mut self, other: &mut Self) {
+    pub fn mul(&mut self, other: &Self) {
         let negative = (self.parts[3] >= 0x80) ^ (other.parts[3] >= 0x80);
 
         if self.parts[3] >= 0x80 {
             self.neg();
         }
 
+        let mut other = Self { parts: other.parts };
         if other.parts[3] >= 0x80 {
             other.neg();
         }
@@ -159,6 +165,94 @@ impl Int32 {
     }
 }
 
+impl Int32 {
+    pub fn div(&mut self, other: &Self) {
+        let negative = (self.parts[3] >= 0x80) ^ (other.parts[3] >= 0x80);
+
+        if self.parts[3] >= 0x80 {
+            self.neg();
+        }
+
+        let mut other = Self { parts: other.parts };
+        if other.parts[3] >= 0x80 {
+            other.neg();
+        }
+
+        // let mut quotient = 0;
+        // loop {
+        //     if other.parts[3] > self.parts[3]
+        //         || (other.parts[3] == self.parts[3] && other.parts[2] > self.parts[2])
+        //         || (other.parts[3] == self.parts[3] && other.parts[2] == self.parts[2] && other.parts[1] > self.parts[1])
+        //         || (other.parts[3] == self.parts[3] && other.parts[2] == self.parts[2] && other.parts[1] == self.parts[1] && other.parts[0] > self.parts[0]) {
+        //         break;
+        //     }
+
+        //     self.sub(&other);
+        //     quotient += 1;
+        // }
+
+        // *self = Int32::from(if negative { -quotient } else { quotient });
+
+        let mut check = Self { parts: self.parts };
+        check.sub(&other);
+        if check.parts[3] >= 0x80 {
+            *self = Self::from(0);
+            return;
+        }
+
+        let mut q = Self::from(0);
+        if other.parts[3] == 0x00 && other.parts[2] < 0x80 {
+            q = Self { parts: self.parts };
+            q.div(&Self { parts: [0, other.parts[0], other.parts[1], other.parts[2]] });
+        };
+
+        let mut tmp = Self { parts: q.parts };
+        tmp.mul(&Self { parts: [0, other.parts[0], other.parts[1], other.parts[2]] });
+        self.sub(&tmp);
+
+        let mut quotient = 0;
+        loop {
+            self.sub(&other);
+            if self.parts[3] >= 0x80 {
+                break
+            }
+
+            quotient += 1;
+        }
+
+        let mut r = Self { parts: [quotient, q.parts[0], q.parts[1], q.parts[2]] };
+        if negative {
+            r.neg();
+        }
+
+        *self = r;
+    }
+}
+
+impl Int32 {
+    pub fn sqrt(&mut self) {
+        if self.parts[3] >= 0x80 {
+            panic!()
+        }
+
+        if self.parts == [0, 0, 0, 0] {
+            *self = Self::from(0);
+            return;
+        }
+
+        let mut guess = Self::from(5);
+        for _ in 0..20 {
+            let mut inv = Self { parts: self.parts };
+            inv.div(&guess);
+
+            guess.add(&inv);
+            guess.div(&Self::from(2));
+        }
+
+        *self = guess;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,6 +299,11 @@ mod tests {
         n = Int32::from(0x06666666);
         n.neg();
         assert_eq!(n, (-0x06666666).into());
+
+        let a = rand::random::<i32>();
+        let mut n = Int32::from(a);
+        n.neg();
+        assert_eq!(n, (a.wrapping_neg()).into(), "negate: -{}", a);
     }
 
     #[test]
@@ -236,71 +335,148 @@ mod tests {
         n = Int32::from(0x09999999);
         n.add(&Int32::from(-0x06666666));
         assert_eq!(n, (0x03333333).into());
+
+        let (a, b) = (rand::random::<i32>(), rand::random::<i32>());
+        let mut n = Int32::from(a);
+        n.add(&Int32::from(b));
+        assert_eq!(n, (a.wrapping_add(b)).into(), "add: {} + {}", a, b);
     }
 
     #[test]
     fn sub() {
         let mut n = Int32::from(1);
-        n.sub(&mut Int32::from(1));
+        n.sub(&Int32::from(1));
         assert_eq!(n, 0.into());
 
         n = Int32::from(0x09999999);
-        n.sub(&mut Int32::from(0x06666666));
+        n.sub(&Int32::from(0x06666666));
         assert_eq!(n, 0x03333333.into());
 
         n = Int32::from(0x100);
-        n.sub(&mut Int32::from(1));
+        n.sub(&Int32::from(1));
         assert_eq!(n, 0xFF.into());
 
         n = Int32::from(0x10000);
-        n.sub(&mut Int32::from(1));
+        n.sub(&Int32::from(1));
         assert_eq!(n, 0xFFFF.into());
 
         n = Int32::from(0x1000000);
-        n.sub(&mut Int32::from(1));
+        n.sub(&Int32::from(1));
         assert_eq!(n, 0xFFFFFF.into());
 
         n = Int32::from(0);
-        n.sub(&mut Int32::from(1));
+        n.sub(&Int32::from(1));
         assert_eq!(n, (-1).into());
+
+        let (a, b) = (rand::random::<i32>(), rand::random::<i32>());
+        let mut n = Int32::from(a);
+        n.sub(&Int32::from(b));
+        assert_eq!(n, (a.wrapping_sub(b)).into(), "subtract: {} - {}", a, b);
     }
 
     #[test]
     fn mul() {
         let mut n = Int32::from(68375);
-        n.mul(&mut Int32::from(2317));
+        n.mul(&Int32::from(2317));
         assert_eq!(n, 158424875.into());
 
         let mut n = Int32::from(68375);
-        n.mul(&mut Int32::from(0));
+        n.mul(&Int32::from(0));
         assert_eq!(n, 0.into());
 
         let mut n = Int32::from(68375);
-        n.mul(&mut Int32::from(1));
+        n.mul(&Int32::from(1));
         assert_eq!(n, 68375.into());
 
         let mut n = Int32::from(1);
-        n.mul(&mut Int32::from(2317));
+        n.mul(&Int32::from(2317));
         assert_eq!(n, 2317.into());
 
         let mut n = Int32::from(68375);
-        n.mul(&mut Int32::from(-2317));
+        n.mul(&Int32::from(-2317));
         assert_eq!(n, (-158424875).into());
 
         let mut n = Int32::from(-68375);
-        n.mul(&mut Int32::from(2317));
+        n.mul(&Int32::from(2317));
         assert_eq!(n, (-158424875).into());
 
         let mut n = Int32::from(-68375);
-        n.mul(&mut Int32::from(-2317));
+        n.mul(&Int32::from(-2317));
         assert_eq!(n, 158424875.into());
 
         let mut n = Int32::from(0xFF);
-        n.mul(&mut Int32::from(0xFF));
+        n.mul(&Int32::from(0xFF));
         assert_eq!(n, (0xFF * 0xFF).into());
 
         let mut n = Int32::from(-0xFF);
-        n.mul(&mut Int32::from(-0xFF));
+        n.mul(&Int32::from(-0xFF));
         assert_eq!(n, (0xFF * 0xFF).into());
+
+        for _ in 0..100 {
+            let (a, b) = (rand::random::<i32>(), rand::random::<i32>());
+            let mut n = Int32::from(a);
+            n.mul(&Int32::from(b));
+            assert_eq!(n, (a.wrapping_mul(b)).into(), "multiply: {} * {}", a, b);
+        }
+    }
+
+    #[test]
+    fn div() {
+        let mut n = Int32::from(781);
+        n.div(&Int32::from(330519));
+        assert_eq!(n, 0.into());
+
+        let mut n = Int32::from(330519);
+        n.div(&Int32::from(781));
+        assert_eq!(n, 423.into());
+
+        let mut n = Int32::from(1);
+        n.div(&Int32::from(1));
+        assert_eq!(n, 1.into());
+
+        let mut n = Int32::from(-1);
+        n.div(&Int32::from(1));
+        assert_eq!(n, (-1).into());
+
+        let mut n = Int32::from(1);
+        n.div(&Int32::from(-1));
+        assert_eq!(n, (-1).into());
+
+        let mut n = Int32::from(256);
+        n.div(&Int32::from(3));
+        assert_eq!(n, 85.into());
+
+        let mut n = Int32::from(1543938581);
+        n.div(&Int32::from(-623681255));
+        assert_eq!(n, (1543938581 / -623681255).into());
+
+        let mut n = Int32::from(884474092);
+        n.div(&Int32::from(13586197));
+        assert_eq!(n, (884474092 / 13586197).into());
+
+        for _ in 0..100 {
+            let (a, b) = (rand::random::<i32>(), rand::random::<i32>());
+            let mut n = Int32::from(a);
+            n.div(&Int32::from(b));
+            assert_eq!(n, (a / b).into(), "divide: {} / {}", a, b);
+        }
+    }
+
+    #[test]
+    fn sqrt() {
+        let mut n = Int32::from(1);
+        n.sqrt();
+        assert_eq!(n, 1.into());
+
+        let mut n = Int32::from(4);
+        n.sqrt();
+        assert_eq!(n, 2.into());
+
+        for _ in 0..100 {
+            let a = rand::random::<i32>() & 0x7FFFFFFF;
+            let mut n = Int32::from(a);
+            n.sqrt();
+            assert_eq!(n, ((a as f64).sqrt() as i32).into(), "sqrt: {}", a);
+        }
     }
 }
